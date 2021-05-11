@@ -661,6 +661,11 @@ impl_ReprC_for! { unsafe {
     ,
 
     @for[T : ReprC]
+    mem::ManuallyDrop<T>
+        => |ref _it: T::CLayout| true
+    ,
+
+    @for[T : ReprC]
     ptr::NonNull<T>
         => |ref it: *mut T::CLayout| {
             it.is_null().not() &&

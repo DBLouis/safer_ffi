@@ -29,26 +29,44 @@ macro_rules! __cfg_not_headers__ {(
 )}
 
 #[macro_export] #[doc(hidden)]
-macro_rules! __with_doc__ {(
-    #[doc = $doc:expr]
-    $(#[$meta:meta])*
-    $pub:vis
-    struct
-    $($rest:tt)*
-) => (
-    $(#[$meta])*
-    #[doc = $doc]
-    $pub
-    struct
-    $($rest)*
-)}
+macro_rules! __with_doc__ {
+    (
+        #[doc = $doc:expr]
+        $(#[$meta:meta])*
+        $pub:vis
+        struct
+        $($rest:tt)*
+    ) => (
+        $(#[$meta])*
+        #[doc = $doc]
+        $pub
+        struct
+        $($rest)*
+    );
+    (
+        #[doc = $doc:expr]
+        $(#[$meta:meta])*
+        $pub:vis
+        union
+        $($rest:tt)*
+    ) => (
+        $(#[$meta])*
+        #[doc = $doc]
+        $pub
+        union
+        $($rest)*
+    )
+
+}
 /// Safely implement [`CType`][`trait@crate::layout::CType`]
 /// for a `#[repr(C)]` struct **when all its fields are `CType`**.
 ///
 /// Note: you rarely need to call this macro directly. Instead, look for the
 /// [`ReprC!`] macro to safely implement [`ReprC`][`trait@crate::layout::ReprC`].
 #[macro_export]
-macro_rules! CType {(
+macro_rules! CType {
+// struct
+(
     $(
         @doc_meta( $($doc_meta:tt)* )
     )?
@@ -182,6 +200,147 @@ macro_rules! CType {(
     $crate::layout::from_CType_impl_ReprC! {
         $(@for [$($lt ,)* $($($generics),+)?])?
             $StructName
+                $(<$($lt ,)* $($($generics),+)?>
+                    where
+                        $($($bounds)*)?
+                )?
+    }
+);
+// union
+(
+    $(
+        @doc_meta( $($doc_meta:tt)* )
+    )?
+    #[repr(C)]
+    $(#[$($meta:tt)*])*
+    $pub:vis
+    union $UnionName:ident $(
+        [
+            $($lt:lifetime ,)*
+            $($($generics:ident),+ $(,)?)?
+        ]
+            $(where { $($bounds:tt)* })?
+    )?
+    {
+        $(
+            $(#[$($field_meta:tt)*])*
+            $field_pub:vis
+            $field_name:ident : $field_ty:ty
+        ),+ $(,)?
+    }
+) => (
+    #[repr(C)]
+    $(#[$($meta)*])*
+    $pub
+    union $UnionName
+        $(<$($lt ,)* $($($generics),+)?> $(where $($bounds)* )?)?
+    {
+        $(
+            $(#[$($field_meta)*])*
+            $field_pub
+            $field_name : $crate::core::mem::ManuallyDrop<$field_ty>,
+        )*
+    }
+
+    unsafe // Safety: union is `#[repr(C)]` and contains `CType` fields
+    impl $(<$($lt ,)* $($($generics),+)?>)? $crate::layout::CType
+        for $UnionName$(<$($lt ,)* $($($generics),+)?>)?
+    where
+        $(
+            $field_ty : $crate::layout::CType,
+        )*
+        $(
+            $($(
+                $generics : $crate::layout::ReprC,
+            )+)?
+            $($($bounds)*)?
+        )?
+    { $crate::__cfg_headers__! {
+        fn c_short_name_fmt (fmt: &'_ mut $crate::core::fmt::Formatter<'_>)
+          -> $crate::core::fmt::Result
+        {
+            fmt.write_str($crate::core::stringify!($UnionName))?;
+            $($(
+                $(
+                    $crate::core::write!(fmt, "_{}",
+                        <
+                            <$generics as $crate::layout::ReprC>::CLayout
+                            as
+                            $crate::layout::CType
+                        >::c_short_name()
+                    )?;
+                )+
+            )?)?
+            Ok(())
+        }
+
+        fn c_define_self (definer: &'_ mut dyn $crate::headers::Definer)
+          -> $crate::std::io::Result<()>
+        {
+            assert_ne!(
+                $crate::core::mem::size_of::<Self>(), 0,
+                "C does not support zero-sized unions!",
+            );
+            let ref me =
+                <Self as $crate::layout::CType>
+                    ::c_short_name().to_string()
+            ;
+            definer.define_once(
+                me,
+                &mut |definer| {
+                    $(
+                        <$field_ty as $crate::layout::CType>::c_define_self(definer)?;
+                    )*
+                    let out = definer.out();
+                    $(
+                        $crate::__output_docs__!(out, "", $($doc_meta)*);
+                    )?
+                    $crate::__output_docs__!(out, "", $(#[$($meta)*])*);
+                    $crate::core::writeln!(out, "typedef union {{\n")?;
+                    $(
+                        if $crate::core::mem::size_of::<$field_ty>() > 0 {
+                            // $crate::core::writeln!(out, "")?;
+                            $crate::__output_docs__!(out, "    ",
+                                $(#[$($field_meta)*])*
+                            );
+                            $crate::core::writeln!(out, "    {};\n",
+                                <$field_ty as $crate::layout::CType>::c_var(
+                                    $crate::core::stringify!($field_name),
+                                ),
+                            )?;
+                        } else {
+                            assert_eq!(
+                                $crate::core::mem::align_of::<$field_ty>(),
+                                1,
+                                $crate::core::concat!(
+                                    "Zero-sized fields must have an ",
+                                    "alignment of `1`."
+                                ),
+                            );
+                        }
+                    )+
+                    $crate::core::writeln!(out, "}} {}_t;\n", me)
+                },
+            )
+        }
+
+        fn c_var_fmt (
+            fmt: &'_ mut $crate::core::fmt::Formatter<'_>,
+            var_name: &'_ str,
+        ) -> $crate::core::fmt::Result
+        {
+            $crate::core::write!(fmt,
+                "{}_t{sep}{}",
+                <Self as $crate::layout::CType>::c_short_name(),
+                var_name,
+                sep = if var_name.is_empty() { "" } else { " " },
+            )
+        }
+    } type OPAQUE_KIND = $crate::layout::OpaqueKind::Concrete; }
+
+    $crate::layout::from_CType_impl_ReprC! {
+        $(@for [$($lt ,)* $($($generics),+)?])?
+            $UnionName
                 $(<$($lt ,)* $($($generics),+)?>
                     where
                         $($($bounds)*)?
@@ -416,6 +575,178 @@ macro_rules! ReprC {
 
             impl $(<$($lt ,)* $($($generics),+)?>)? $crate::core::clone::Clone
                 for $StructName $(<$($lt ,)* $($($generics),+)?>)?
+            where
+                $(
+                    $field_ty : $crate::layout::ReprC,
+                )*
+                $(
+                    $($(
+                        $generics : $crate::layout::ReprC,
+                    )+)?
+                    $($($bounds)*)?
+                )?
+            {
+                #[inline]
+                fn clone (self: &'_ Self)
+                    -> Self
+                {
+                    *self
+                }
+            }
+        };
+    );
+
+    // union
+    (
+        $( @[doc = $doc:expr] )?
+        $(#[doc = $prev_doc:tt])* // support doc comments _before_ `#[repr(C)]`
+        #[repr(C)]
+        $(#[$($meta:tt)*])*
+        $pub:vis
+        union $UnionName:ident $(
+            [
+                $($lt:lifetime ,)*
+                $($($generics:ident),+ $(,)?)?
+            ]
+                $(where { $($bounds:tt)* })?
+        )?
+        {
+            $(
+                $(#[$($field_meta:tt)*])*
+                $field_pub:vis
+                $field_name:ident : $field_ty:ty
+            ),+ $(,)?
+        }
+    ) => (
+        $crate::__with_doc__! {
+            #[doc = $crate::core::concat!(
+                "  - [`",
+                $crate::core::stringify!($UnionName),
+                "_Layout`]"
+            )]
+            $(#[doc = $prev_doc])*
+            #[repr(C)]
+            $(#[doc = $doc])?
+            $(#[$($meta)*])*
+            /// # C Layout
+            ///
+            $pub
+            union $UnionName $(
+                <$($lt ,)* $($($generics),+)?> $(
+                    where $($bounds)*
+                )?
+            )?
+            {
+                $(
+                    $(#[$($field_meta)*])*
+                    $field_pub
+                    $field_name : $field_ty,
+                )*
+            }
+        }
+
+        $crate::paste::item! {
+            #[allow(nonstandard_style)]
+            $pub use
+                [< __ $UnionName _safer_ffi_mod >]::$UnionName
+                as
+                [< $UnionName _Layout >]
+            ;
+        }
+
+        #[allow(trivial_bounds)]
+        unsafe // Safety: union is `#[repr(C)]` and contains `ReprC` fields
+        impl $(<$($lt ,)* $($($generics),+)?>)? $crate::layout::ReprC
+            for $UnionName $(<$($lt ,)* $($($generics),+)?>)?
+        where
+            $(
+                $field_ty : $crate::layout::ReprC,
+                <$field_ty as $crate::layout::ReprC>::CLayout
+                    : $crate::layout::CType<
+                        OPAQUE_KIND = $crate::layout::OpaqueKind::Concrete,
+                    >,
+            )*
+            $(
+                $($(
+                    $generics : $crate::layout::ReprC,
+                )+)?
+                $($($bounds)*)?
+            )?
+        {
+
+            type CLayout = $crate::paste::__item__! {
+                [<$UnionName _Layout>]
+                    $(<$($lt ,)* $($($generics),+)?>)?
+            };
+
+            #[inline]
+            fn is_valid (it: &'_ Self::CLayout)
+                -> bool
+            {
+                let _ = it;
+                true // FIXME
+            }
+        }
+        $crate::paste::item! {
+            #[allow(nonstandard_style, trivial_bounds)]
+            mod [< __ $UnionName _safer_ffi_mod >] {
+                #[allow(unused_imports)]
+                use super::*;
+
+                $crate::layout::CType! {
+                    @doc_meta(
+                        $(#[doc = $prev_doc])*
+                        $(#[$($meta)*])*
+                    )
+                    #[repr(C)]
+                    #[allow(missing_debug_implementations)]
+                    // $(#[$meta])*
+                    pub
+                    union $UnionName
+                        [$($($lt ,)* $($($generics),+)?)?]
+                    where {
+                        $(
+                            $field_ty : $crate::layout::ReprC,
+                        )*
+                        $(
+                            $($(
+                                $generics : $crate::layout::ReprC,
+                            )+)?
+                            $($($bounds)*)?
+                        )?
+                    } {
+                        $(
+                            $(#[$($field_meta)*])*
+                            pub
+                            $field_name :
+                                <$field_ty as $crate::layout::ReprC>::CLayout
+                            ,
+                        )*
+                    }
+                }
+            }
+        }
+        const _: () = {
+            $crate::paste::item! {
+                use [< __ $UnionName _safer_ffi_mod >]::*;
+            }
+
+            impl $(<$($lt ,)* $($($generics),+)?>)? $crate::core::marker::Copy
+                for $UnionName $(<$($lt ,)* $($($generics),+)?>)?
+            where
+                $(
+                    $field_ty : $crate::layout::ReprC,
+                )*
+                $(
+                    $($(
+                        $generics : $crate::layout::ReprC,
+                    )+)?
+                    $($($bounds)*)?
+                )?
+            {}
+
+            impl $(<$($lt ,)* $($($generics),+)?>)? $crate::core::clone::Clone
+                for $UnionName $(<$($lt ,)* $($($generics),+)?>)?
             where
                 $(
                     $field_ty : $crate::layout::ReprC,
