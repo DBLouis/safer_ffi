@@ -37,6 +37,18 @@ enum MyBool {
     True, // = 43
 }
 
+//#[derive_ReprC]
+//#[repr(C, u8)]
+////#[derive(Debug)]
+///// Some docstring
+//pub
+//enum MyEnum {
+//    A(u32),
+//    B(f32, u64),
+//    C { x: u32, y: u8 },
+//    D, // empty
+//}
+
 #[derive_ReprC]
 #[repr(C)]
 /// Some docstring

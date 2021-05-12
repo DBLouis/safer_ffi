@@ -713,17 +713,268 @@ macro_rules! ReprC {
 
     // non-field-less repr-c-only enum
     (
-        $(#[doc = $prev_doc:tt])*
+        $( @[doc = $doc:expr] )?
+        $(#[doc = $prev_doc:tt])* // support doc comments _before_ `#[repr(C)]`
         #[repr(C $(, $Int:ident)?)]
-        $(#[$meta:meta])*
+        $(#[$($meta:tt)*])*
         $pub:vis
-        enum $EnumName:ident {
-            $($variants:tt)*
+        enum $EnumName:ident $(
+            [
+                $($lt:lifetime ,)*
+                $($($generics:ident),+ $(,)?)?
+            ]
+                $(where { $($bounds:tt)* })?
+        )?
+        {
+            $(
+                $(#[$($variant_meta:tt)*])*
+                $variant_name:ident
+                // struct variant
+                $({
+                    $(
+                        $(#[$($struct_field_meta:tt)*])*
+                        $struct_field_name:ident : $struct_field_ty:ty
+                    ),+ $(,)?
+                })?
+                // tuple variant
+                $((
+                    $(
+                        $(#[$($tuple_field_meta:tt)*])*
+                        $tuple_field_ty:ty
+                    ),+ $(,)?
+                ))?
+            ),*
         }
     ) => (
-        $crate::core::compile_error! {
-            "Non field-less `enum`s are not supported yet."
+        $crate::layout::ReprC! {
+            @validate_int_repr $Int
         }
+        $crate::layout::ReprC! {
+            @deny_C $Int
+        }
+
+        $crate::__with_doc__! {
+            #[doc = $crate::core::concat!(
+                "  - [`",
+                $crate::core::stringify!($EnumName),
+                "_Layout`]"
+            )]
+            $(#[doc = $prev_doc])*
+            #[repr(C $(, $Int)?)]
+            $(#[doc = $doc])?
+            $(#[$($meta)*])*
+            /// # C Layout
+            ///
+            $pub
+            enum $EnumName $(
+                <$($lt ,)* $($($generics),+)?> $(
+                    where $($bounds)*
+                )?
+            )?
+            {
+                $(
+                    $(#[$($variant_meta)*])*
+                    $variant_name
+                    // struct variant
+                    $({
+                        $(
+                            $(#[$($struct_field_meta)*])*
+                            $struct_field_name : $struct_field_ty,
+                        )*
+                    })?
+                    // tuple variant
+                    $((
+                        $(
+                            $(#[$($tuple_field_meta)*])*
+                            $tuple_field_name : $tuple_field_ty,
+                        )*
+                    ))?
+                )*
+            }
+        }
+
+        $crate::paste::item! {
+            #[allow(nonstandard_style)]
+            $pub use
+                [< __ $EnumName _safer_ffi_mod >]::$EnumName
+                as
+                [< $EnumName _Layout >]
+            ;
+        }
+
+        #[allow(trivial_bounds)]
+        unsafe // Safety: enum is `#[repr(C)]` and contains `ReprC` fields
+        impl $(<$($lt ,)* $($($generics),+)?>)? $crate::layout::ReprC
+            for $EnumName $(<$($lt ,)* $($($generics),+)?>)?
+        where
+            $(
+                // struct variant
+                $(
+                    $(
+                        $struct_field_ty : $crate::layout::ReprC,
+                        <$struct_field_ty as $crate::layout::ReprC>::CLayout
+                            : $crate::layout::CType<
+                                OPAQUE_KIND = $crate::layout::OpaqueKind::Concrete,
+                            >,
+                    )*
+                )?
+                // tuple variant
+                $(
+                    $(
+                        $tuple_field_ty : $crate::layout::ReprC,
+                        <$tuple_field_ty as $crate::layout::ReprC>::CLayout
+                            : $crate::layout::CType<
+                                OPAQUE_KIND = $crate::layout::OpaqueKind::Concrete,
+                            >,
+                    )*
+                )?
+
+            )*
+            $(
+                $($(
+                    $generics : $crate::layout::ReprC,
+                )+)?
+                $($($bounds)*)?
+            )?
+        {
+
+            type CLayout = $crate::paste::__item__! {
+                [<$EnumName _Layout>]
+                    $(<$($lt ,)* $($($generics),+)?>)?
+            };
+
+            #[inline]
+            fn is_valid (it: &'_ Self::CLayout)
+                -> bool
+            {
+                let _ = it;
+                true // FIXME
+            }
+        }
+
+        $crate::paste::item! {
+            #[allow(nonstandard_style, trivial_bounds)]
+            mod [< __ $EnumName _safer_ffi_mod >] {
+                #[allow(unused_imports)]
+                use super::*;
+
+                #[repr(C $(, $Int)?)]
+                pub enum [< __ $EnumName _ Tag >] {
+                    $(
+                        $variant_name
+                    ),*
+                }
+
+                #[repr(C)]
+                pub union [< __ $EnumName _ Data >] {
+                    $(
+                        [< $variant_name:lower >] : [< __ $EnumName _ $variant_name >]
+                    ),*
+                }
+
+                $(
+                    // struct variant
+                    $(
+                        #[repr(C)]
+                        pub struct [< __ $EnumName _ $variant_name >] {
+                            $(
+                                $struct_field_name : $struct_field_ty
+                            ),*
+                        }
+                    )?
+                    // tuple variant
+                    $(
+                        #[repr(C)]
+                        pub struct [< __ $EnumName _ $variant_name >] (
+                            $(
+                                $tuple_field_name :
+                                    <$tuple_field_ty as <$crate::layout::ReprC>::CLayout>
+                            ),*
+                        );
+                    )?
+
+                )*
+
+                $crate::layout::CType! {
+                    @doc_meta(
+                        $(#[doc = $prev_doc])*
+                        $(#[$($meta)*])*
+                    )
+                    #[repr(C $(, $Int)?)]
+                    #[allow(missing_debug_implementations)]
+                    // $(#[$meta])*
+                    pub
+                    struct $EnumName
+                        [$($($lt ,)* $($($generics),+)?)?]
+                    where {
+                        $(
+                            // struct variant
+                            $(
+                                $(
+                                    $struct_field_ty : $crate::layout::ReprC,
+                                )*
+                            )?
+                            // tuple variant
+                            $(
+                                $(
+                                    $tuple_field_ty : $crate::layout::ReprC,
+                                )*
+                            )?
+                        )*
+                        $(
+                            $($(
+                                $generics : $crate::layout::ReprC,
+                            )+)?
+                            $($($bounds)*)?
+                        )?
+                    } {
+                        pub tag: [< __ $EnumName _ Tag >],
+                        pub data: [< __ $EnumName _ Data >],
+                    }
+                }
+            }
+        }
+
+        //const _: () = {
+        //    $crate::paste::item! {
+        //        use [< __ $EnumName _safer_ffi_mod >]::*;
+        //    }
+
+        //    impl $(<$($lt ,)* $($($generics),+)?>)? $crate::core::marker::Copy
+        //        for $EnumName $(<$($lt ,)* $($($generics),+)?>)?
+        //    where
+        //        $(
+        //            $field_ty : $crate::layout::ReprC,
+        //        )*
+        //        $(
+        //            $($(
+        //                $generics : $crate::layout::ReprC,
+        //            )+)?
+        //            $($($bounds)*)?
+        //        )?
+        //    {}
+
+        //    impl $(<$($lt ,)* $($($generics),+)?>)? $crate::core::clone::Clone
+        //        for $EnumName $(<$($lt ,)* $($($generics),+)?>)?
+        //    where
+        //        $(
+        //            $field_ty : $crate::layout::ReprC,
+        //        )*
+        //        $(
+        //            $($(
+        //                $generics : $crate::layout::ReprC,
+        //            )+)?
+        //            $($($bounds)*)?
+        //        )?
+        //    {
+        //        #[inline]
+        //        fn clone (self: &'_ Self)
+        //            -> Self
+        //        {
+        //            *self
+        //        }
+        //    }
+        //};
     );
 
     // opaque
@@ -1039,6 +1290,17 @@ mod test {
         enum MyBool {
             False = 42,
             True, // = 43
+        }
+    }
+
+    ReprC! {
+        #[repr(C, u8)]
+        pub
+        enum MyEnum {
+            A(u32),
+            B(f32, u64),
+            C { x: u32, y: u8 },
+            D, // empty
         }
     }
 
